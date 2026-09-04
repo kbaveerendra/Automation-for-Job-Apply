@@ -15,7 +15,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 db = JobDatabase()
 
-# 1. Define your list of target roles
+# 1. Define list of target roles
 TARGET_ROLES = [
     "AI Engineer", 
     "ML Engineer", 
@@ -113,9 +113,9 @@ def run_job_bot():
                     except Exception as e:
                         print(f"Navigation warning: {e}")
                     
-                    # Wait for the page to load, but don't crash if no jobs are found
+                    # Wait for search cards OR direct job detail links to render
                     try:
-                        page.wait_for_selector("dhi-search-card", timeout=5000)
+                        page.wait_for_selector("dhi-search-card, [data-cy='search-card'], a[href*='/job-detail/']", timeout=7000)
                     except Exception:
                         print(f"No more jobs found for {role} on page {current_page}. Moving to next role.")
                         break # Break out of the pagination loop and move to the next role
