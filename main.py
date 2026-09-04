@@ -15,14 +15,17 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 db = JobDatabase()
 
+# 1. Define your list of target roles
 TARGET_ROLES = [
-    "AI Engineer",
-    "ML Engineer",
-    "BI Engineer",
-    "Data Scientist",
-    "Data Analyst",
+    "AI Engineer", 
+    "ML Engineer", 
+    "BI Engineer", 
+    "Data Scientist", 
+    "Data Analyst", 
     "AI/ML Engineer"
 ]
+
+MAX_PAGES = 3 # Adjust this based on how deep you want to search per role
 
 def is_target_role(job_title: str) -> bool:
     """
@@ -81,111 +84,109 @@ def run_job_bot():
         print("Error: state.json missing. Please run setup_auth.py first.")
         return
 
-    # Configuration
-    PAGES_PER_ROLE = 2
-    BASE_SEARCH_URL = "https://www.dice.com/jobs?q={query}&easyApply=true&page={page}"
-
     with sync_playwright() as p:
-        # Headless=True for silent production execution
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True) # Set to False if you want to watch it work
         context = browser.new_context(storage_state="state.json")
         page = context.new_page()
-
+        
         try:
-            for role_query in TARGET_ROLES:
-                encoded_query = urllib.parse.quote(role_query)
-
-                for current_page in range(1, PAGES_PER_ROLE + 1):
-                    target_url = BASE_SEARCH_URL.format(query=encoded_query, page=current_page)
-                    print(f"\n{'='*55}")
-                    print(f"TARGET ROLE: '{role_query}' | PAGE {current_page} OF {PAGES_PER_ROLE}")
+            # OUTERMOST LOOP: Iterate through each job role
+            for role in TARGET_ROLES:
+                print(f"\n{'#'*50}")
+                print(f"🚀 NOW SEARCHING FOR: {role}")
+                print(f"{'#'*50}")
+                
+                # URL Encoding handles spaces and special characters (like the '/' in AI/ML)
+                encoded_role = urllib.parse.quote(role)
+                
+                # Construct the URL with the role AND the Easy Apply filter already applied
+                BASE_SEARCH_URL = f"https://www.dice.com/jobs?q={encoded_role}&easyApply=true&page={{}}"
+                
+                # PAGINATION LOOP
+                for current_page in range(1, MAX_PAGES + 1):
+                    target_url = BASE_SEARCH_URL.format(current_page)
+                    print(f"\nLoading {role} - Page {current_page} of {MAX_PAGES}")
                     print(f"Target URL: {target_url}")
-                    print(f"{'='*55}")
-
+                    
                     try:
                         page.goto(target_url, wait_until="domcontentloaded")
                     except Exception as e:
-                        print(f"Warning: Navigation error loading search page: {e}")
+                        print(f"Navigation warning: {e}")
                     
-                    time.sleep(4)  # Wait for dynamic JS rendering
-
-                    # Ensure Easy Apply filter is active on UI
+                    # Wait for the page to load, but don't crash if no jobs are found
+                    try:
+                        page.wait_for_selector("dhi-search-card", timeout=5000)
+                    except Exception:
+                        print(f"No more jobs found for {role} on page {current_page}. Moving to next role.")
+                        break # Break out of the pagination loop and move to the next role
+                    
+                    time.sleep(3)
+                    
+                    # Ensure Easy Apply filter is enabled on UI
                     ensure_easy_apply_filter_enabled(page)
 
+                    job_cards = page.query_selector_all("dhi-search-card") or page.query_selector_all("[data-cy='search-card']")
                     jobs_to_apply = []
                     seen_ids = set()
+                    
+                    # --- PHASE 1: GATHER PHASE ---
+                    for card in job_cards:
+                        try:
+                            title_element = card.query_selector("a.card-title-link") or card.query_selector("a[data-cy='card-title-link']") or card.query_selector("a")
+                            if not title_element:
+                                continue
 
-                    # --- PHASE 1: GATHER ---
-                    print(f"\n--- Phase 1: Gathering Jobs for '{role_query}' (Page {current_page}) ---")
-                    job_cards = page.query_selector_all("dhi-search-card") or page.query_selector_all("[data-cy='search-card']")
+                            raw_href = title_element.get_attribute("href") or ""
+                            job_url = raw_href if raw_href.startswith("http") else f"https://www.dice.com{raw_href}"
+                            job_title = title_element.inner_text().strip()
+                            
+                            if not is_target_role(job_title):
+                                continue
 
-                    if job_cards:
-                        print(f"Found {len(job_cards)} job cards via search card elements.")
-                        for card in job_cards:
-                            try:
-                                title_element = card.query_selector("a.card-title-link") or card.query_selector("a[data-cy='card-title-link']") or card.query_selector("a")
-                                if not title_element:
-                                    continue
-
-                                raw_href = title_element.get_attribute("href") or ""
-                                job_url = raw_href if raw_href.startswith("http") else f"https://www.dice.com{raw_href}"
-                                job_title = title_element.inner_text().strip()
-
-                                # Strict Job Role Check
-                                if not is_target_role(job_title):
-                                    print(f"-> Skipped (Role mismatch): '{job_title}'")
-                                    continue
-
-                                company_element = card.query_selector("a[data-cy='search-result-company-name']") or card.query_selector(".comp-name")
-                                company_name = company_element.inner_text().strip() if company_element else "Unknown"
-
-                                # Clean job ID extraction (handles trailing slashes)
-                                job_id = job_url.rstrip('/').split('/')[-1].split('?')[0]
-
-                                if job_id and job_id not in seen_ids:
-                                    seen_ids.add(job_id)
-                                    if not db.is_job_applied(job_id):
-                                        print(f"-> Queued: {job_title} at {company_name} (ID: {job_id})")
-                                        jobs_to_apply.append({"id": job_id, "title": job_title, "company": company_name, "url": job_url})
-                                    else:
-                                        print(f"-> Skipped (Already processed): {job_title} (ID: {job_id})")
-                            except Exception as e:
-                                print(f"Card Extraction Error: {e}")
+                            company_element = card.query_selector("a[data-cy='search-result-company-name']") or card.query_selector(".comp-name")
+                            company_name = company_element.inner_text().strip() if company_element else "Unknown"
+                            
+                            job_id = job_url.rstrip('/').split('/')[-1].split('?')[0]
+                            
+                            if job_id and job_id not in seen_ids:
+                                seen_ids.add(job_id)
+                                if not db.is_job_applied(job_id):
+                                    jobs_to_apply.append({
+                                        "id": job_id, 
+                                        "title": job_title, 
+                                        "company": company_name, 
+                                        "url": job_url
+                                    })
+                        except Exception:
+                            pass # Skip broken cards silently
 
                     # Fallback via direct job-detail links
                     if not jobs_to_apply:
-                        print("Notice: Trying fallback extraction via job-detail links...")
                         job_links = page.query_selector_all("a[href*='/job-detail/']")
-                        print(f"Found {len(job_links)} candidate job links on page {current_page}.")
-
                         for link in job_links:
                             try:
                                 raw_href = link.get_attribute("href") or ""
                                 job_url = raw_href if raw_href.startswith("http") else f"https://www.dice.com{raw_href}"
                                 job_title = link.inner_text().strip()
-                                if not job_title or len(job_title) < 3:
-                                    continue
-
-                                # Strict Job Role Check
-                                if not is_target_role(job_title):
+                                if not job_title or len(job_title) < 3 or not is_target_role(job_title):
                                     continue
 
                                 job_id = job_url.rstrip('/').split('/')[-1].split('?')[0]
-
                                 if job_id and job_id not in seen_ids:
                                     seen_ids.add(job_id)
                                     if not db.is_job_applied(job_id):
-                                        print(f"-> Queued via fallback: {job_title} (ID: {job_id})")
-                                        jobs_to_apply.append({"id": job_id, "title": job_title, "company": "Dice Listing", "url": job_url})
-                                    else:
-                                        print(f"-> Skipped (Already processed): {job_title} (ID: {job_id})")
-                            except Exception as e:
-                                print(f"Link Extraction Error: {e}")
+                                        jobs_to_apply.append({
+                                            "id": job_id, 
+                                            "title": job_title, 
+                                            "company": "Dice Listing", 
+                                            "url": job_url
+                                        })
+                            except Exception:
+                                pass
 
-                    print(f"Found {len(jobs_to_apply)} matching target jobs on page {current_page}.")
+                    print(f"Gathered {len(jobs_to_apply)} new {role} jobs. Starting applications...")
 
-                    # --- PHASE 2: APPLICATION FLOW ---
-                    print(f"\n--- Phase 2: Application Flow ({role_query} - Page {current_page}) ---")
+                    # --- PHASE 2: APPLICATION PHASE ---
                     for job in jobs_to_apply:
                         print(f"\nProcessing: {job['title']} at {job['company']} (ID: {job['id']})")
 
@@ -228,7 +229,6 @@ def run_job_bot():
                                     break
 
                                 elif next_button.is_visible():
-                                    # Check if Next button is disabled (requires user input)
                                     if next_button.is_disabled():
                                         print("-> Failed: 'Next' button disabled (requires mandatory text/dropdown input).")
                                         db.record_job(job['id'], job['title'], job['company'], job['url'], status="FAILED", notes="Mandatory question required")
@@ -271,18 +271,15 @@ def run_job_bot():
                             print(f"-> Crash during application: {e}")
                             db.record_job(job['id'], job['title'], job['company'], job['url'], status="FAILED", notes=f"Error: {str(e)}")
 
-                    # Pause between pages/queries
-                    time.sleep(5)
-
-            print("\n" + "="*55)
-            print("All target roles processed. Closing browser.")
-            print("="*55)
-
-            print("\n--- Final Database Summary ---")
-            all_jobs = db.get_all_jobs()
-            for item in all_jobs:
-                print(f"ID: {item['job_id']} | Status: {item['status']} | Title: {item['title']} | Company: {item['company']}")
-
+                    # Pause between pages to avoid rate limiting
+                    if current_page < MAX_PAGES:
+                        time.sleep(10)
+                        
+                # Pause between different job roles to be safe
+                print(f"Finished searching for {role}. Cooling down for 15 seconds...")
+                time.sleep(15)
+                
+            print("\nAll roles processed! Closing browser.")
         finally:
             try:
                 browser.close()
